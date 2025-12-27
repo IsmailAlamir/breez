@@ -147,6 +147,30 @@ def cancel_appointment(appointment_id: int):
     conn.close()
     return {"status": "success", "message": "تم إلغاء الموعد بنجاح"}
 
+@app.get("/appointments")
+def get_appointments():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM appointments")
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = [dict(row) for row in rows]
+    return {"status": "success", "count": len(results), "appointments": results}
+
+@app.get("/appointments/{appointment_id}")
+def get_appointment(appointment_id: int = Path(..., description="ID of the appointment")):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM appointments WHERE id = ?", (appointment_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="الموعد غير موجود")
+    
+    return {"status": "success", "appointment": dict(row)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
