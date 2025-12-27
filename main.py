@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, HTTPException, status, Path
 from pydantic import BaseModel, Field
 import sqlite3
@@ -11,7 +10,7 @@ app = FastAPI(
     version="2.0"
 )
 
-DB_NAME = "dental_clinic_secure.db"
+DB_NAME = "dental_clinic.db"
 
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
@@ -37,9 +36,8 @@ def init_db():
 
 init_db()
 
-
 class BookingRequest(BaseModel):
-    patient_name: str = Field(..., min_length=2, description="اسم المريض ")
+    patient_name: str = Field(..., min_length=2, description="اسم المريض")
     age: int = Field(..., gt=0, le=120, description="العمر للتحقق من الهوية")
     service: str
     appointment_date: str
@@ -64,10 +62,10 @@ class AppointmentResponse(BaseModel):
 
 @app.get("/")
 def health_check():
-    """Health check endpoint for monitoring systems."""
+    """Health check endpoint"""
     return {"status": "operational", "system": "Breez Dental Backend"}
 
-@app.post("/bookings", status_code=status.HTTP_201_CREATED)
+@app.post("/appointments", status_code=status.HTTP_201_CREATED)
 def create_appointment(booking: BookingRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -91,15 +89,10 @@ def create_appointment(booking: BookingRequest):
     new_id = cursor.lastrowid
     conn.close()
 
-    return {
-        "status": "success",
-        "id": new_id,
-        "message": "تم تأكيد الحجز بنجاح"
-    }
+    return {"status": "success", "id": new_id, "message": "تم تأكيد الحجز بنجاح"}
 
 @app.post("/verify")
 def verify_identity_and_find_appointment(data: VerifyRequest):
-
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -115,12 +108,7 @@ def verify_identity_and_find_appointment(data: VerifyRequest):
 
     results = [dict(row) for row in rows]
     
-    return {
-        "status": "found",
-        "count": len(results),
-        "appointments": results, 
-        "message": "تم التحقق من الهوية."
-    }
+    return {"status": "found", "count": len(results), "appointments": results, "message": "تم التحقق من الهوية."}
 
 @app.patch("/appointments/{appointment_id}")
 def reschedule_appointment(
@@ -157,7 +145,6 @@ def cancel_appointment(appointment_id: int):
 
     conn.commit()
     conn.close()
-
     return {"status": "success", "message": "تم إلغاء الموعد بنجاح"}
 
 if __name__ == "__main__":
