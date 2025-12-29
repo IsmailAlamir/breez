@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, status, Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import sqlite3
 from typing import Optional, List
 from datetime import datetime
@@ -37,8 +37,8 @@ def init_db():
 init_db()
 
 class BookingRequest(BaseModel):
-    patient_name: str = Field(..., min_length=2, description="اسم المريض")
-    age: int = Field(..., gt=0, le=120, description="العمر للتحقق من الهوية")
+    patient_name: str
+    age: int
     service: str
     appointment_date: str
     insurance_provider: Optional[str] = "None"
@@ -65,31 +65,76 @@ def health_check():
     """Health check endpoint"""
     return {"status": "operational", "system": "Breez Dental Backend"}
 
+# دالة مساعدة لتوحيد صيغة التاريخ
+def parse_and_validate_date(date_str: str):
+    # نحاول قراءة التاريخ بأكثر من صيغة محتملة يرسلها الايجنت
+    formats = [
+        "%Y-%m-%dT%H:%M:%SZ",      # ISO format (2025-12-30T15:00:00Z)
+        "%Y-%m-%d %H:%M:%S",       # SQL format (2025-12-30 15:00:00)
+        "%d/%m/%Y %H:%M:%S",       # Slash format (30/12/2025 15:00:00)
+        "%Y-%m-%d %H:%M"           # Short format
+    ]
+    
+    dt_obj = None
+    for fmt in formats:
+        try:
+            dt_obj = datetime.strptime(date_str.replace("Z", ""), fmt)
+            break
+        except ValueError:
+            continue
+            
+    if not dt_obj:
+        raise HTTPException(status_code=400, detail="صيغة التاريخ غير مفهومة، يرجى استخدام YYYY-MM-DD HH:MM")
+
+    # 1. التحقق من أن التاريخ ليس في الماضي
+    if dt_obj < datetime.now():
+         raise HTTPException(status_code=400, detail=f"لا يمكن حجز موعد في الماضي! تاريخ اليوم هو {datetime.now().strftime('%Y-%m-%d')}")
+
+    # نرجع التاريخ بصيغة موحدة لقاعدة البيانات
+    return dt_obj.strftime("%Y-%m-%d %H:%M") # نخزن حتى الدقائق فقط
+
 @app.post("/appointments", status_code=status.HTTP_201_CREATED)
 def create_appointment(booking: BookingRequest):
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    # 1. تنظيف التاريخ والتحقق منه
+    try:
+        clean_date = parse_and_validate_date(booking.appointment_date)
+    except HTTPException as e:
+        conn.close()
+        raise e
+
+    # 2. فحص التضارب (هل الوقت محجوز لأي شخص آخر؟)
+    # ملاحظة: نفحص الساعة فقط ونتجاهل الثواني لتجنب تضارب مثل 15:00:00 مع 15:00:30
     cursor.execute(
-        "SELECT id FROM appointments WHERE patient_name = ? AND appointment_date = ?",
-        (booking.patient_name, booking.appointment_date)
+        "SELECT id FROM appointments WHERE appointment_date = ?",
+        (clean_date,)
     )
     if cursor.fetchone():
         conn.close()
-        raise HTTPException(status_code=409, detail="يوجد موعد مسجل مسبقاً لهذا المريض في نفس التوقيت")
+        # نرجع كود 409 يعني Conflict
+        raise HTTPException(status_code=409, detail=f"عذراً، الموعد بتاريخ {clean_date} محجوز مسبقاً. يرجى اختيار وقت آخر.")
 
+    # 3. الحجز
     cursor.execute(
         """
         INSERT INTO appointments (patient_name, age, service, appointment_date, insurance_provider, notes)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (booking.patient_name, booking.age, booking.service, booking.appointment_date, booking.insurance_provider, booking.notes)
+        (booking.patient_name, booking.age, booking.service, clean_date, booking.insurance_provider, booking.notes)
     )
     conn.commit()
     new_id = cursor.lastrowid
     conn.close()
 
-    return {"status": "success", "id": new_id, "message": "تم تأكيد الحجز بنجاح"}
+    return {
+        "status": "success",
+        "id": new_id,
+        "message": f"تم تأكيد الحجز يوم {clean_date}",
+        "patient_name": booking.patient_name,
+        "appointment_date": clean_date
+    }
 
 @app.post("/verify")
 def verify_identity_and_find_appointment(data: VerifyRequest):
