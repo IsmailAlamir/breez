@@ -110,10 +110,11 @@ def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute(
-        "SELECT appointment_date FROM appointments WHERE appointment_date LIKE ?",
-        (f"{date}%",)
-    )
+    query = "SELECT appointment_date FROM appointments WHERE appointment_date LIKE ?"
+    params = (f"{date}%",)
+    print(f"Query: {query}, Params: {params}")
+
+    cursor.execute(query, params)
     booked = [datetime.strptime(r[0], "%Y-%m-%d %H:%M").hour for r in cursor.fetchall()]
     conn.close()
 
@@ -143,13 +144,14 @@ def create_appointment(data: AppointmentCreate):
         conn.close()
         raise HTTPException(409, "الموعد غير متاح")
 
-    conn.execute(
-        """
+    query = """
         INSERT INTO appointments (patient_name, age, service, appointment_date)
         VALUES (?, ?, ?, ?)
-        """,
-        (data.patient_name, data.age, data.service, valid_date_str)
-    )
+        """
+    params = (data.patient_name, data.age, data.service, valid_date_str)
+    print(f"Query: {query}, Params: {params}")
+
+    conn.execute(query, params)
     conn.commit()
     conn.close()
 
