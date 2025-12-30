@@ -128,14 +128,27 @@ def get_all_appointments():
 
 
 # ---------- Availability ----------
+def clean_date_string(date_str: str) -> str:
+    if not date_str:
+        return ""
+    cleaned = date_str.replace('"', '').replace("'", "")
+    cleaned = cleaned.strip()
+    return cleaned[:10]
+
 @app.get("/availability")
 def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
+    clean_date = clean_date_string(date)
+    try:
+        datetime.strptime(clean_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
     conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute(
         "SELECT appointment_date FROM appointments WHERE appointment_date LIKE ?",
-        (f"{date}%",)
+        (f"{clean_date}%",)
     )
     booked = [datetime.strptime(r[0], "%Y-%m-%d %H:%M").hour for r in cursor.fetchall()]
     conn.close()
@@ -147,7 +160,7 @@ def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
     ]
 
     return {
-        "date": date,
+        "date": clean_date,
         "available_slots": slots
     }
 
