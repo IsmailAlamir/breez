@@ -1,220 +1,236 @@
-from fastapi import FastAPI, HTTPException, status, Path
+from fastapi import FastAPI, HTTPException, status, Path, Query
 from pydantic import BaseModel
 import sqlite3
-from typing import Optional, List
-from datetime import datetime
+from typing import Optional
+from datetime import datetime, timedelta
 
 app = FastAPI(
-    title="Breez Dental Clinic API",
-    description="A secure, RESTful API for managing dental appointments with Identity Verification.",
-    version="2.0"
+    title="Dental Clinic API",
+    description="Voice Agent Appointment Booking",
+    version="3.0"
 )
 
-DB_NAME = "dental_clinic.db"
+DB_NAME = "clinic.db"
+WORK_START = 8
+WORK_END = 16
+APPOINTMENT_DURATION = 60  # minutes
 
-def get_db_connection():
+# ---------- Database ----------
+def get_db():
     conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row 
+    conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    conn = get_db_connection()
-    conn.execute('''
+    conn = get_db()
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_name TEXT NOT NULL,
             age INTEGER NOT NULL,
             service TEXT NOT NULL,
-            appointment_date TEXT NOT NULL,
-            insurance_provider TEXT,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            appointment_date TEXT NOT NULL
         )
-    ''')
+    """)
     conn.commit()
     conn.close()
 
 init_db()
 
-class BookingRequest(BaseModel):
+# ---------- Models ----------
+class AppointmentCreate(BaseModel):
     patient_name: str
     age: int
     service: str
+    appointment_date: str  # YYYY-MM-DD HH:MM
+
+class AppointmentUpdate(BaseModel):
     appointment_date: str
-    insurance_provider: Optional[str] = "None"
-    notes: Optional[str] = ""
 
-class VerifyRequest(BaseModel):
-    patient_name: str
-    age: int
-
-class RescheduleRequest(BaseModel):
-    new_date: str
-
-class AppointmentResponse(BaseModel):
-    id: int
-    patient_name: str
-    service: str
-    appointment_date: str
-    status: str
-    message: str
-
-
-@app.get("/")
-def health_check():
-    """Health check endpoint"""
-    return {"status": "operational", "system": "Breez Dental Backend"}
-
-# دالة مساعدة لتوحيد صيغة التاريخ
-def parse_and_validate_date(date_str: str):
-    # نحاول قراءة التاريخ بأكثر من صيغة محتملة يرسلها الايجنت
-    formats = [
-        "%Y-%m-%dT%H:%M:%SZ",      # ISO format (2025-12-30T15:00:00Z)
-        "%Y-%m-%d %H:%M:%S",       # SQL format (2025-12-30 15:00:00)
-        "%d/%m/%Y %H:%M:%S",       # Slash format (30/12/2025 15:00:00)
-        "%Y-%m-%d %H:%M"           # Short format
-    ]
-    
-    dt_obj = None
-    for fmt in formats:
-        try:
-            dt_obj = datetime.strptime(date_str.replace("Z", ""), fmt)
-            break
-        except ValueError:
-            continue
-            
-    if not dt_obj:
-        raise HTTPException(status_code=400, detail="صيغة التاريخ غير مفهومة، يرجى استخدام YYYY-MM-DD HH:MM")
-
-    # 1. التحقق من أن التاريخ ليس في الماضي
-    if dt_obj < datetime.now():
-         raise HTTPException(status_code=400, detail=f"لا يمكن حجز موعد في الماضي! تاريخ اليوم هو {datetime.now().strftime('%Y-%m-%d')}")
-
-    # نرجع التاريخ بصيغة موحدة لقاعدة البيانات
-    return dt_obj.strftime("%Y-%m-%d %H:%M") # نخزن حتى الدقائق فقط
-
-@app.post("/appointments", status_code=status.HTTP_201_CREATED)
-def create_appointment(booking: BookingRequest):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    # 1. تنظيف التاريخ والتحقق منه
+# ---------- Helpers ----------
+def parse_date(date_str: str) -> datetime:
     try:
-        clean_date = parse_and_validate_date(booking.appointment_date)
-    except HTTPException as e:
-        conn.close()
-        raise e
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise HTTPException(400, "صيغة التاريخ يجب أن تكون YYYY-MM-DD HH:MM")
 
-    # 2. فحص التضارب (هل الوقت محجوز لأي شخص آخر؟)
-    # ملاحظة: نفحص الساعة فقط ونتجاهل الثواني لتجنب تضارب مثل 15:00:00 مع 15:00:30
-    cursor.execute(
-        "SELECT id FROM appointments WHERE appointment_date = ?",
-        (clean_date,)
-    )
-    if cursor.fetchone():
-        conn.close()
-        # نرجع كود 409 يعني Conflict
-        raise HTTPException(status_code=409, detail=f"عذراً، الموعد بتاريخ {clean_date} محجوز مسبقاً. يرجى اختيار وقت آخر.")
+def check_availability(conn, target_dt: datetime, exclude_id: int = None):
+    start = (target_dt - timedelta(minutes=59)).strftime("%Y-%m-%d %H:%M")
+    end = (target_dt + timedelta(minutes=59)).strftime("%Y-%m-%d %H:%M")
 
-    # 3. الحجز
-    cursor.execute(
-        """
-        INSERT INTO appointments (patient_name, age, service, appointment_date, insurance_provider, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (booking.patient_name, booking.age, booking.service, clean_date, booking.insurance_provider, booking.notes)
-    )
-    conn.commit()
-    new_id = cursor.lastrowid
+    query = """
+        SELECT id FROM appointments
+        WHERE appointment_date > ? AND appointment_date < ?
+    """
+    params = [start, end]
+
+    if exclude_id:
+        query += " AND id != ?"
+        params.append(exclude_id)
+
+    cursor = conn.execute(query, params)
+    return cursor.fetchone() is None
+
+# ---------- Health ----------
+@app.get("/")
+def get_all_appointments():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM appointments ORDER BY appointment_date"
+    ).fetchall()
     conn.close()
 
     return {
-        "status": "success",
-        "id": new_id,
-        "message": f"تم تأكيد الحجز يوم {clean_date}",
-        "patient_name": booking.patient_name,
-        "appointment_date": clean_date
+        "count": len(rows),
+        "appointments": [dict(row) for row in rows]
     }
 
-@app.post("/verify")
-def verify_identity_and_find_appointment(data: VerifyRequest):
-    conn = get_db_connection()
+
+# ---------- Availability ----------
+@app.get("/availability")
+def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
+    conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT id, appointment_date, service FROM appointments WHERE patient_name LIKE ? AND age = ?",
-        (f"%{data.patient_name}%", data.age)
+        "SELECT appointment_date FROM appointments WHERE appointment_date LIKE ?",
+        (f"{date}%",)
     )
-    rows = cursor.fetchall()
+    booked = [datetime.strptime(r[0], "%Y-%m-%d %H:%M").hour for r in cursor.fetchall()]
     conn.close()
 
-    if not rows:
-        return {"status": "not_found", "message": "لم يتم العثور على حجز مطابق للاسم والعمر."}
+    slots = [
+        f"{hour:02d}:00"
+        for hour in range(WORK_START, WORK_END)
+        if hour not in booked
+    ]
 
-    results = [dict(row) for row in rows]
-    
-    return {"status": "found", "count": len(results), "appointments": results, "message": "تم التحقق من الهوية."}
+    return {
+        "date": date,
+        "available_slots": slots
+    }
 
-@app.patch("/appointments/{appointment_id}")
-def reschedule_appointment(
-    appointment_id: int = Path(..., description="The ID obtained from verification step"),
-    update_data: RescheduleRequest = None
-):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+# ---------- Create ----------
+@app.post("/appointments", status_code=status.HTTP_201_CREATED)
+def create_appointment(data: AppointmentCreate):
+    dt = parse_date(data.appointment_date)
 
-    cursor.execute("SELECT id FROM appointments WHERE id = ?", (appointment_id,))
-    if not cursor.fetchone():
+    if dt < datetime.now():
+        raise HTTPException(400, "لا يمكن الحجز في الماضي")
+
+    if not (WORK_START <= dt.hour < WORK_END):
+        raise HTTPException(400, "خارج ساعات الدوام")
+
+    conn = get_db()
+
+    if not check_availability(conn, dt):
         conn.close()
-        raise HTTPException(status_code=404, detail="الموعد غير موجود")
+        raise HTTPException(409, "الموعد غير متاح")
 
-    cursor.execute(
-        "UPDATE appointments SET appointment_date = ? WHERE id = ?",
-        (update_data.new_date, appointment_id)
+    conn.execute(
+        """
+        INSERT INTO appointments (patient_name, age, service, appointment_date)
+        VALUES (?, ?, ?, ?)
+        """,
+        (data.patient_name, data.age, data.service, data.appointment_date)
     )
     conn.commit()
     conn.close()
 
-    return {"status": "success", "message": f"تم تعديل الموعد إلى {update_data.new_date}"}
+    return {"status": "booked", "appointment_date": data.appointment_date}
 
-@app.delete("/appointments/{appointment_id}")
-def cancel_appointment(appointment_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("DELETE FROM appointments WHERE id = ?", (appointment_id,))
-    
-    if cursor.rowcount == 0:
-        conn.close()
-        raise HTTPException(status_code=404, detail="الموعد غير موجود أو تم حذفه مسبقاً")
-
-    conn.commit()
-    conn.close()
-    return {"status": "success", "message": "تم إلغاء الموعد بنجاح"}
-
+# ---------- Get (Verify + Read) ----------
 @app.get("/appointments")
-def get_appointments():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM appointments")
-    rows = cursor.fetchall()
+def get_appointments(
+    patient_name: Optional[str] = None,
+    age: Optional[int] = None
+):
+    conn = get_db()
+    query = "SELECT id, appointment_date, service FROM appointments WHERE 1=1"
+    params = []
+
+    if patient_name:
+        query += " AND patient_name LIKE ?"
+        params.append(f"%{patient_name}%")
+
+    if age:
+        query += " AND age = ?"
+        params.append(age)
+
+    query += " ORDER BY appointment_date"
+
+    rows = conn.execute(query, params).fetchall()
     conn.close()
 
-    results = [dict(row) for row in rows]
-    return {"status": "success", "count": len(results), "appointments": results}
+    return {
+        "count": len(rows),
+        "appointments": [dict(row) for row in rows]
+    }
 
+# ---------- Get One ----------
 @app.get("/appointments/{appointment_id}")
-def get_appointment(appointment_id: int = Path(..., description="ID of the appointment")):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM appointments WHERE id = ?", (appointment_id,))
-    row = cursor.fetchone()
+def get_appointment(appointment_id: int = Path(...)):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM appointments WHERE id = ?",
+        (appointment_id,)
+    ).fetchone()
     conn.close()
 
     if not row:
-        raise HTTPException(status_code=404, detail="الموعد غير موجود")
-    
-    return {"status": "success", "appointment": dict(row)}
+        raise HTTPException(404, "الموعد غير موجود")
+
+    return dict(row)
+
+# ---------- Update ----------
+@app.patch("/appointments/{appointment_id}")
+def update_appointment(
+    appointment_id: int,
+    data: AppointmentUpdate
+):
+    new_dt = parse_date(data.appointment_date)
+
+    conn = get_db()
+
+    exists = conn.execute(
+        "SELECT id FROM appointments WHERE id = ?",
+        (appointment_id,)
+    ).fetchone()
+
+    if not exists:
+        conn.close()
+        raise HTTPException(404, "الموعد غير موجود")
+
+    if not check_availability(conn, new_dt, appointment_id):
+        conn.close()
+        raise HTTPException(409, "التوقيت الجديد غير متاح")
+
+    conn.execute(
+        "UPDATE appointments SET appointment_date = ? WHERE id = ?",
+        (data.appointment_date, appointment_id)
+    )
+    conn.commit()
+    conn.close()
+
+    return {"status": "updated", "new_date": data.appointment_date}
+
+# ---------- Delete ----------
+@app.delete("/appointments/{appointment_id}")
+def delete_appointment(appointment_id: int):
+    conn = get_db()
+    cursor = conn.execute(
+        "DELETE FROM appointments WHERE id = ?",
+        (appointment_id,)
+    )
+
+    if cursor.rowcount == 0:
+        conn.close()
+        raise HTTPException(404, "الموعد غير موجود")
+
+    conn.commit()
+    conn.close()
+
+    return {"status": "cancelled"}
 
 if __name__ == "__main__":
     import uvicorn
