@@ -48,11 +48,29 @@ class AppointmentUpdate(BaseModel):
     appointment_date: str
 
 # ---------- Helpers ----------
-def parse_date(date_str: str) -> datetime:
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-    except ValueError:
-        raise HTTPException(400, "صيغة التاريخ يجب أن تكون YYYY-MM-DD HH:MM")
+def parse_and_validate_date(date_str: str):
+    formats = [
+        "%Y-%m-%dT%H:%M:%SZ",      # ISO format (2025-12-30T15:00:00Z)
+        "%Y-%m-%d %H:%M:%S",       # SQL format (2025-12-30 15:00:00)
+        "%d/%m/%Y %H:%M:%S",       # Slash format (30/12/2025 15:00:00)
+        "%Y-%m-%d %H:%M"           # Short format
+    ]
+    
+    dt_obj = None
+    for fmt in formats:
+        try:
+            dt_obj = datetime.strptime(date_str.replace("Z", ""), fmt)
+            break
+        except ValueError:
+            continue
+            
+    if not dt_obj:
+        raise HTTPException(status_code=400, detail="صيغة التاريخ غير مفهومة، يرجى استخدام YYYY-MM-DD HH:MM")
+
+    if dt_obj < datetime.now():
+         raise HTTPException(status_code=400, detail=f"لا يمكن حجز موعد في الماضي! تاريخ اليوم هو {datetime.now().strftime('%Y-%m-%d')}")
+
+    return dt_obj.strftime("%Y-%m-%d %H:%M") 
 
 def check_availability(conn, target_dt: datetime, exclude_id: int = None):
     start = (target_dt - timedelta(minutes=59)).strftime("%Y-%m-%d %H:%M")
@@ -113,10 +131,8 @@ def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
 # ---------- Create ----------
 @app.post("/appointments", status_code=status.HTTP_201_CREATED)
 def create_appointment(data: AppointmentCreate):
-    dt = parse_date(data.appointment_date)
-
-    if dt < datetime.now():
-        raise HTTPException(400, "لا يمكن الحجز في الماضي")
+    valid_date_str = parse_and_validate_date(data.appointment_date)
+    dt = datetime.strptime(valid_date_str, "%Y-%m-%d %H:%M")
 
     if not (WORK_START <= dt.hour < WORK_END):
         raise HTTPException(400, "خارج ساعات الدوام")
@@ -132,12 +148,12 @@ def create_appointment(data: AppointmentCreate):
         INSERT INTO appointments (patient_name, age, service, appointment_date)
         VALUES (?, ?, ?, ?)
         """,
-        (data.patient_name, data.age, data.service, data.appointment_date)
+        (data.patient_name, data.age, data.service, valid_date_str)
     )
     conn.commit()
     conn.close()
 
-    return {"status": "booked", "appointment_date": data.appointment_date}
+    return {"status": "booked", "appointment_date": valid_date_str}
 
 # ---------- Get (Verify + Read) ----------
 @app.get("/appointments")
@@ -188,7 +204,8 @@ def update_appointment(
     appointment_id: int,
     data: AppointmentUpdate
 ):
-    new_dt = parse_date(data.appointment_date)
+    valid_date_str = parse_and_validate_date(data.appointment_date)
+    new_dt = datetime.strptime(valid_date_str, "%Y-%m-%d %H:%M")
 
     conn = get_db()
 
@@ -207,12 +224,12 @@ def update_appointment(
 
     conn.execute(
         "UPDATE appointments SET appointment_date = ? WHERE id = ?",
-        (data.appointment_date, appointment_id)
+        (valid_date_str, appointment_id)
     )
     conn.commit()
     conn.close()
 
-    return {"status": "updated", "new_date": data.appointment_date}
+    return {"status": "updated", "new_date": valid_date_str}
 
 # ---------- Delete ----------
 @app.delete("/appointments/{appointment_id}")
