@@ -13,7 +13,7 @@ app = FastAPI(
 DB_NAME = "clinic.db"
 WORK_START = 8
 WORK_END = 16
-APPOINTMENT_DURATION = 60  # minutes
+APPOINTMENT_DURATION = 59
 
 # ---------- Database ----------
 def get_db():
@@ -72,23 +72,46 @@ def parse_and_validate_date(date_str: str):
 
     return dt_obj.strftime("%Y-%m-%d %H:%M") 
 
-def check_availability(conn, target_dt: datetime, exclude_id: int = None):
-    start = (target_dt - timedelta(minutes=59)).strftime("%Y-%m-%d %H:%M")
-    end = (target_dt + timedelta(minutes=59)).strftime("%Y-%m-%d %H:%M")
+# أضف هذه الدالة المساعدة في بداية الكود أو قبل الـ Endpoints
+def clean_date_string(date_str: str) -> str:
+    if not date_str:
+        return ""
+    # 1. إزالة علامات التنصيص المفردة والمزدوجة
+    cleaned = date_str.replace('"', '').replace("'", "")
+    # 2. إزالة المسافات الزائدة من البداية والنهاية
+    cleaned = cleaned.strip()
+    # 3. (اختياري) نأخذ أول 10 خانات فقط لضمان صيغة YYYY-MM-DD حتى لو انبعث وقت
+    return cleaned[:10]
 
-    query = """
-        SELECT id FROM appointments
-        WHERE appointment_date > ? AND appointment_date < ?
-    """
-    params = [start, end]
+@app.get("/availability")
+def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
+    clean_date = clean_date_string(date)
 
-    if exclude_id:
-        query += " AND id != ?"
-        params.append(exclude_id)
+    try:
+        datetime.strptime(clean_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    cursor = conn.execute(query, params)
-    return cursor.fetchone() is None
+    conn = get_db()
+    cursor = conn.cursor()
 
+    cursor.execute(
+        "SELECT appointment_date FROM appointments WHERE appointment_date LIKE ?",
+        (f"{clean_date}%",)
+    )
+    booked = [datetime.strptime(r[0], "%Y-%m-%d %H:%M").hour for r in cursor.fetchall()]
+    conn.close()
+
+    slots = [
+        f"{hour:02d}:00"
+        for hour in range(WORK_START, WORK_END)
+        if hour not in booked
+    ]
+
+    return {
+        "date": clean_date,
+        "available_slots": slots
+    }
 # ---------- Health ----------
 @app.get("/")
 def get_all_appointments():
