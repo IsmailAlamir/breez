@@ -13,7 +13,7 @@ app = FastAPI(
 DB_NAME = "clinic.db"
 WORK_START = 8
 WORK_END = 16
-APPOINTMENT_DURATION = 59
+APPOINTMENT_DURATION = 60
 
 # ---------- Database ----------
 def get_db():
@@ -42,7 +42,7 @@ class AppointmentCreate(BaseModel):
     patient_name: str
     age: int
     service: str
-    appointment_date: str  # YYYY-MM-DD HH:MM
+    appointment_date: str
 
 class AppointmentUpdate(BaseModel):
     appointment_date: str
@@ -72,46 +72,23 @@ def parse_and_validate_date(date_str: str):
 
     return dt_obj.strftime("%Y-%m-%d %H:%M") 
 
-# أضف هذه الدالة المساعدة في بداية الكود أو قبل الـ Endpoints
-def clean_date_string(date_str: str) -> str:
-    if not date_str:
-        return ""
-    # 1. إزالة علامات التنصيص المفردة والمزدوجة
-    cleaned = date_str.replace('"', '').replace("'", "")
-    # 2. إزالة المسافات الزائدة من البداية والنهاية
-    cleaned = cleaned.strip()
-    # 3. (اختياري) نأخذ أول 10 خانات فقط لضمان صيغة YYYY-MM-DD حتى لو انبعث وقت
-    return cleaned[:10]
+def check_availability(conn, target_dt: datetime, exclude_id: int = None):
+    start = (target_dt - timedelta(minutes=59)).strftime("%Y-%m-%d %H:%M")
+    end = (target_dt + timedelta(minutes=59)).strftime("%Y-%m-%d %H:%M")
 
-@app.get("/availability")
-def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
-    clean_date = clean_date_string(date)
+    query = """
+        SELECT id FROM appointments
+        WHERE appointment_date > ? AND appointment_date < ?
+    """
+    params = [start, end]
 
-    try:
-        datetime.strptime(clean_date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    if exclude_id:
+        query += " AND id != ?"
+        params.append(exclude_id)
 
-    conn = get_db()
-    cursor = conn.cursor()
+    cursor = conn.execute(query, params)
+    return cursor.fetchone() is None
 
-    cursor.execute(
-        "SELECT appointment_date FROM appointments WHERE appointment_date LIKE ?",
-        (f"{clean_date}%",)
-    )
-    booked = [datetime.strptime(r[0], "%Y-%m-%d %H:%M").hour for r in cursor.fetchall()]
-    conn.close()
-
-    slots = [
-        f"{hour:02d}:00"
-        for hour in range(WORK_START, WORK_END)
-        if hour not in booked
-    ]
-
-    return {
-        "date": clean_date,
-        "available_slots": slots
-    }
 # ---------- Health ----------
 @app.get("/")
 def get_all_appointments():
@@ -128,27 +105,14 @@ def get_all_appointments():
 
 
 # ---------- Availability ----------
-def clean_date_string(date_str: str) -> str:
-    if not date_str:
-        return ""
-    cleaned = date_str.replace('"', '').replace("'", "")
-    cleaned = cleaned.strip()
-    return cleaned[:10]
-
 @app.get("/availability")
 def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
-    clean_date = clean_date_string(date)
-    try:
-        datetime.strptime(clean_date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-
     conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute(
         "SELECT appointment_date FROM appointments WHERE appointment_date LIKE ?",
-        (f"{clean_date}%",)
+        (f"{date}%",)
     )
     booked = [datetime.strptime(r[0], "%Y-%m-%d %H:%M").hour for r in cursor.fetchall()]
     conn.close()
@@ -160,7 +124,7 @@ def get_availability(date: str = Query(..., description="YYYY-MM-DD")):
     ]
 
     return {
-        "date": clean_date,
+        "date": date,
         "available_slots": slots
     }
 
